@@ -98,6 +98,29 @@ def print_as_markdown(writer, path, content, line_numbers):
     writer(f"{backticks}")
 
 
+def warn(message):
+    click.echo(click.style(message, fg="red"), err=True)
+
+
+def print_file(writer, path, claude_xml, markdown, line_numbers):
+    """Print one file. Returns True if it was skipped due to an OSError.
+
+    Files skipped for UnicodeDecodeError return False: they are expected
+    (binary files) and do not make the output incomplete.
+    """
+    try:
+        with open(path, "r") as f:
+            content = f.read()
+    except UnicodeDecodeError:
+        warn(f"Warning: Skipping file {path} due to UnicodeDecodeError")
+        return False
+    except OSError as e:
+        warn(f"Warning: Skipping file {path} due to {e}")
+        return True
+    print_path(writer, path, content, claude_xml, markdown, line_numbers)
+    return False
+
+
 def process_path(
     path,
     extensions,
@@ -111,13 +134,10 @@ def process_path(
     markdown,
     line_numbers=False,
 ):
+    """Process a file or directory. Returns True if any file could not be read."""
+    skipped = False
     if os.path.isfile(path):
-        try:
-            with open(path, "r") as f:
-                print_path(writer, path, f.read(), claude_xml, markdown, line_numbers)
-        except UnicodeDecodeError:
-            warning_message = f"Warning: Skipping file {path} due to UnicodeDecodeError"
-            click.echo(click.style(warning_message, fg="red"), err=True)
+        skipped = print_file(writer, path, claude_xml, markdown, line_numbers)
     elif os.path.isdir(path):
         for root, dirs, files in os.walk(path):
             if not include_hidden:
@@ -155,21 +175,9 @@ def process_path(
 
             for file in sorted(files):
                 file_path = os.path.join(root, file)
-                try:
-                    with open(file_path, "r") as f:
-                        print_path(
-                            writer,
-                            file_path,
-                            f.read(),
-                            claude_xml,
-                            markdown,
-                            line_numbers,
-                        )
-                except UnicodeDecodeError:
-                    warning_message = (
-                        f"Warning: Skipping file {file_path} due to UnicodeDecodeError"
-                    )
-                    click.echo(click.style(warning_message, fg="red"), err=True)
+                if print_file(writer, file_path, claude_xml, markdown, line_numbers):
+                    skipped = True
+    return skipped
 
 
 def read_paths_from_stdin(use_null_separator):
@@ -303,6 +311,7 @@ def cli(
     paths = [*paths, *stdin_paths]
 
     gitignore_rules = []
+    any_skipped = False
     writer = click.echo
     fp = None
     if output_file:
@@ -315,7 +324,7 @@ def cli(
             gitignore_rules.extend(read_gitignore(os.path.dirname(path)))
         if claude_xml and path == paths[0]:
             writer("<documents>")
-        process_path(
+        if process_path(
             path,
             extensions,
             include_hidden,
@@ -327,8 +336,11 @@ def cli(
             claude_xml,
             markdown,
             line_numbers,
-        )
+        ):
+            any_skipped = True
     if claude_xml:
         writer("</documents>")
     if fp:
         fp.close()
+    if any_skipped:
+        sys.exit(1)
