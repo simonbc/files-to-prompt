@@ -7,6 +7,14 @@ from click.testing import CliRunner
 from files_to_prompt.cli import cli
 
 
+def stderr_runner():
+    "CliRunner with stdout and stderr kept apart (Click 8.2+ always does this)"
+    try:
+        return CliRunner(mix_stderr=False)
+    except TypeError:
+        return CliRunner()
+
+
 def filenames_from_cxml(cxml_string):
     "Return set of filenames from <source>...</source> tags"
     return set(re.findall(r"<source>(.*?)</source>", cxml_string))
@@ -235,7 +243,7 @@ def test_mixed_paths_with_options(tmpdir):
 
 
 def test_binary_file_warning(tmpdir):
-    runner = CliRunner(mix_stderr=False)
+    runner = stderr_runner()
     with tmpdir.as_cwd():
         os.makedirs("test_dir")
         with open("test_dir/binary_file.bin", "wb") as f:
@@ -439,3 +447,52 @@ def test_markdown(tmpdir, option):
             "`````\n"
         )
         assert expected.strip() == actual.strip()
+
+
+def test_dead_symlink_is_skipped(tmpdir):
+    runner = stderr_runner()
+    with tmpdir.as_cwd():
+        os.makedirs("test_dir")
+        with open("test_dir/a.txt", "w") as f:
+            f.write("Contents of a")
+        with open("test_dir/z.txt", "w") as f:
+            f.write("Contents of z")
+        os.symlink("does_not_exist.txt", "test_dir/broken_link.txt")
+
+        result = runner.invoke(cli, ["test_dir", "-o", "out.txt"])
+        assert result.exit_code == 1
+        assert "Warning: Skipping file test_dir/broken_link.txt due to" in (
+            result.stderr
+        )
+        with open("out.txt") as f:
+            output = f.read()
+        assert "Contents of a" in output
+        assert "Contents of z" in output
+        assert "broken_link" not in output
+
+
+@pytest.mark.skipif(
+    os.name == "nt" or (hasattr(os, "geteuid") and os.geteuid() == 0),
+    reason="chmod 000 does not block reads on Windows or as root",
+)
+def test_unreadable_file_is_skipped(tmpdir):
+    runner = stderr_runner()
+    with tmpdir.as_cwd():
+        os.makedirs("test_dir")
+        with open("test_dir/a.txt", "w") as f:
+            f.write("Contents of a")
+        with open("test_dir/secret.txt", "w") as f:
+            f.write("Contents of secret")
+        with open("test_dir/z.txt", "w") as f:
+            f.write("Contents of z")
+        os.chmod("test_dir/secret.txt", 0)
+        try:
+            result = runner.invoke(cli, ["test_dir"])
+        finally:
+            os.chmod("test_dir/secret.txt", 0o644)
+        assert result.exit_code == 1
+        assert "Warning: Skipping file test_dir/secret.txt due to" in result.stderr
+        assert "Permission denied" in result.stderr
+        assert "Contents of a" in result.stdout
+        assert "Contents of z" in result.stdout
+        assert "secret" not in result.stdout
